@@ -1,0 +1,206 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clinic
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clinic-config
+  namespace: clinic
+data:
+  SPRING_PROFILES_ACTIVE: eks
+  SPRING_DATASOURCE_URL: jdbc:postgresql://REPLACE_WITH_RDS_ENDPOINT:5432/clinic
+  SPRING_DATASOURCE_DRIVER: org.postgresql.Driver
+  IDENTITY_SERVICE_URL: http://identity-service:8081
+  CLINIC_SERVICE_URL: http://clinic-service:8082
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clinic-secrets
+  namespace: clinic
+type: Opaque
+stringData:
+  SPRING_DATASOURCE_USERNAME: REPLACE_WITH_RDS_USERNAME
+  SPRING_DATASOURCE_PASSWORD: REPLACE_WITH_RDS_PASSWORD
+  APP_SECURITY_JWT_SECRET: REPLACE_WITH_BASE64_ENCODED_32_BYTE_SECRET
+  APP_AUTH_USERNAME: REPLACE_WITH_DEMO_USERNAME
+  APP_AUTH_PASSWORD: REPLACE_WITH_DEMO_PASSWORD
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-service
+  namespace: clinic
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: identity-service
+  template:
+    metadata:
+      labels:
+        app: identity-service
+    spec:
+      containers:
+        - name: identity-service
+          image: REPLACE_WITH_ECR_URI/identity-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - secretRef:
+                name: clinic-secrets
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity-service
+  namespace: clinic
+spec:
+  selector:
+    app: identity-service
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clinic-service
+  namespace: clinic
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clinic-service
+  template:
+    metadata:
+      labels:
+        app: clinic-service
+    spec:
+      containers:
+        - name: clinic-service
+          image: REPLACE_WITH_ECR_URI/clinic-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: clinic-config
+            - secretRef:
+                name: clinic-secrets
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clinic-service
+  namespace: clinic
+spec:
+  selector:
+    app: clinic-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: clinic
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: REPLACE_WITH_ECR_URI/api-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: clinic-config
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: clinic
+spec:
+  type: LoadBalancer
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
