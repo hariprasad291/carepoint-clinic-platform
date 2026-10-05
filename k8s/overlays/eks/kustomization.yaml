@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+images:
+  - name: carepoint-api-gateway
+    newName: REPLACE_WITH_AWS_ACCOUNT_ID.dkr.ecr.REPLACE_WITH_AWS_REGION.amazonaws.com/carepoint-api-gateway
+    newTag: replace-me
+  - name: carepoint-clinic-service
+    newName: REPLACE_WITH_AWS_ACCOUNT_ID.dkr.ecr.REPLACE_WITH_AWS_REGION.amazonaws.com/carepoint-clinic-service
+    newTag: replace-me
+  - name: carepoint-identity-service
+    newName: REPLACE_WITH_AWS_ACCOUNT_ID.dkr.ecr.REPLACE_WITH_AWS_REGION.amazonaws.com/carepoint-identity-service
+    newTag: replace-me

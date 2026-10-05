@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clinic-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clinic-service
+  template:
+    metadata:
+      labels:
+        app: clinic-service
+    spec:
+      containers:
+        - name: clinic-service
+          image: carepoint-clinic-service:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: clinic-config
+          env:
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: clinic-secrets
+                  key: SPRING_DATASOURCE_USERNAME
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clinic-secrets
+                  key: SPRING_DATASOURCE_PASSWORD
+            - name: APP_SECURITY_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clinic-secrets
+                  key: APP_SECURITY_JWT_SECRET
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi

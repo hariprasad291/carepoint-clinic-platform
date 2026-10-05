@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: clinic-service
+spec:
+  selector:
+    app: clinic-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: http

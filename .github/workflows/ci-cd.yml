@@ -1,0 +1,246 @@
+name: CI and EKS delivery
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clinic-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Build, test, and validate manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build and run tests
+        run: mvn --batch-mode --no-transfer-progress verify
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+        with:
+          version: v1.34.0
+
+      - name: Set up Go for kubeconform
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Install kubeconform
+        run: go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+      - name: Lint GitHub Actions workflow
+        run: '"$(go env GOPATH)/bin/actionlint" .github/workflows/ci-cd.yml'
+
+      - name: Render and validate EKS manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl kustomize k8s/overlays/eks > "$RUNNER_TEMP/clinic-eks.yaml"
+          "$(go env GOPATH)/bin/kubeconform" \
+            -strict \
+            -summary \
+            -kubernetes-version 1.34.0 \
+            "$RUNNER_TEMP/clinic-eks.yaml"
+
+  sonarcloud:
+    name: SonarCloud analysis
+    if: >-
+      vars.SONAR_ENABLED == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Run SonarCloud analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        run: >-
+          mvn --batch-mode --no-transfer-progress
+          org.sonarsource.scanner.maven:sonar-maven-plugin:5.1.0.4751:sonar
+          -Dsonar.host.url=https://sonarcloud.io
+          -Dsonar.organization="${SONAR_ORGANIZATION}"
+          -Dsonar.projectKey="${SONAR_PROJECT_KEY}"
+          -Dsonar.qualitygate.wait=true
+          -Dsonar.qualitygate.timeout=300
+
+  build-and-push:
+    name: Build, scan, and push ${{ matrix.service }}
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.verify.result == 'success' &&
+      (needs.sonarcloud.result == 'success' || needs.sonarcloud.result == 'skipped')
+    needs:
+      - verify
+      - sonarcloud
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api-gateway
+            repository: carepoint-api-gateway
+            dockerfile: api-gateway/Dockerfile
+          - service: clinic-service
+            repository: carepoint-clinic-service
+            dockerfile: clinic-service/Dockerfile
+          - service: identity-service
+            repository: carepoint-identity-service
+            dockerfile: identity-service/Dockerfile
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Configure AWS credentials with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.ECR_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push immutable commit image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ matrix.repository }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Scan the pushed image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ matrix.repository }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  deploy-eks:
+    name: Deploy immutable images to EKS
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.verify.result == 'success' &&
+      needs.build-and-push.result == 'success' &&
+      (needs.sonarcloud.result == 'success' || needs.sonarcloud.result == 'skipped')
+    needs:
+      - verify
+      - sonarcloud
+      - build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: clinic-production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Configure AWS credentials with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.EKS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+        with:
+          version: v1.34.0
+
+      - name: Set up Go for Kustomize
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Install Kustomize
+        run: |
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.6.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure EKS access
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Set deployment images to this commit
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          cd k8s/overlays/eks
+          kustomize edit set image \
+            "carepoint-api-gateway=${registry}/carepoint-api-gateway:${IMAGE_TAG}" \
+            "carepoint-clinic-service=${registry}/carepoint-clinic-service:${IMAGE_TAG}" \
+            "carepoint-identity-service=${registry}/carepoint-identity-service:${IMAGE_TAG}"
+
+      - name: Apply Kubernetes resources
+        run: kubectl apply -k k8s/overlays/eks
+
+      - name: Wait for database and application rollouts
+        run: |
+          kubectl -n clinic rollout status statefulset/postgres --timeout=10m
+          kubectl -n clinic rollout status deployment/identity-service --timeout=5m
+          kubectl -n clinic rollout status deployment/clinic-service --timeout=5m
+          kubectl -n clinic rollout status deployment/api-gateway --timeout=5m

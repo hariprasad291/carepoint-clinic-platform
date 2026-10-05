@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clinic-config
+data:
+  SPRING_PROFILES_ACTIVE: eks
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/clinic
+  SPRING_DATASOURCE_DRIVER: org.postgresql.Driver
+  IDENTITY_SERVICE_URL: http://identity-service:8081
+  CLINIC_SERVICE_URL: http://clinic-service:8082

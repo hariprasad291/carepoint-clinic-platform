@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+data:
+  10-create-clinic-app.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+    psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+      --set=ON_ERROR_STOP=1 --set=app_password="$CLINIC_APP_PASSWORD" <<'SQL'
+    CREATE ROLE clinic_app WITH LOGIN PASSWORD :'app_password';
+    GRANT CONNECT ON DATABASE clinic TO clinic_app;
+    GRANT USAGE, CREATE ON SCHEMA public TO clinic_app;
+    SQL

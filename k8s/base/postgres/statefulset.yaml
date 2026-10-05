@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres-headless
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: postgres
+          image: postgres:17-bookworm
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: clinic-secrets
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clinic-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clinic-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: CLINIC_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clinic-secrets
+                  key: CLINIC_APP_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d/10-create-clinic-app.sh
+              subPath: 10-create-clinic-app.sh
+              readOnly: true
+      volumes:
+        - name: postgres-init
+          configMap:
+            name: postgres-init
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
